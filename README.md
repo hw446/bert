@@ -29,4 +29,4 @@ mpirun -np 16 \
       --learning_rate=2e-5 \
       --gpus=0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3 \
 ```
-Here, --gpus indicate the gpu used by each worker.
+Here, `--gpus` indicate the gpu used by each worker.
