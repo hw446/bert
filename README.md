@@ -4,7 +4,7 @@
 
 [Horovod](https://github.com/uber/horovod)
 
-## Pre-trained with multi-GPU
+## Run pretraining with multi-GPU
 
 ```shell
 export BERT_BASE_DIR=/path/to/bert/xxxxxxxx_L-12_H-768_A-12
