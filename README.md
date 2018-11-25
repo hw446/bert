@@ -30,3 +30,15 @@ mpirun -np 16 \
       --gpus=0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3 \
 ```
 Here, `--gpus` indicate the gpu used by each worker.
+
+## Freeze lower layers
+
+Configure `bert_config.json` as follow:
+```
+"stop_grad_layers": "bert/embeddings/,bert/encoder/layer_[0-x]"
+```
+The embedding layer and the 0-th encoder layer to x-th encoder layer will stop gradient.
+```
+"stop_grad_layers": ""
+```
+All layers will not stop gradient.
