@@ -20,9 +20,33 @@ from __future__ import print_function
 
 import re
 import tensorflow as tf
+import horovod.tensorflow as hvd
 
 
-def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
+def stop_grad(tvars, stop_grad_layers):
+  layers = stop_grad_layers.split(",")
+  stop_grad_layers = []
+  for layer in layers:
+    if layer.endswith("]"):
+      rang = layer[layer.find('[') + 1: -1].split("-")
+      layer = layer[: layer.find('[')].strip()
+      start, end = int(rang[0]), int(rang[1]) + 1
+      for idx in range(start, end):
+        stop_grad_layers.append('{}{}/'.format(layer, idx))
+    else:
+      stop_grad_layers.append(layer.strip())
+
+  new_tvars = []
+  for var in tvars:
+    for layer in stop_grad_layers:
+      if var.name.startswith(layer):
+        break
+    else:
+      new_tvars.append(var)
+  return new_tvars
+
+
+def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, stop_grad_layers):
   """Creates an optimizer training op."""
   global_step = tf.train.get_or_create_global_step()
 
@@ -68,7 +92,20 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
     optimizer = tf.contrib.tpu.CrossShardOptimizer(optimizer)
 
   tvars = tf.trainable_variables()
-  grads = tf.gradients(loss, tvars)
+  tvars = stop_grad(tvars, stop_grad_layers)
+
+  if hvd.rank() == 0:
+    tf.logging.info("**** Real Trainable Variables ****")
+    for var in tvars:
+      tf.logging.info("  name = %s, shape = %s", var.name, var.shape)
+
+  # original version
+  # grads = tf.gradients(loss, tvars)
+
+  # horovod version
+  optimizer = hvd.DistributedOptimizer(optimizer)
+  grads_and_vars = optimizer.compute_gradients(loss, tvars)
+  grads = [g for g, v in grads_and_vars if g is not None]
 
   # This is how the model was pre-trained.
   (grads, _) = tf.clip_by_global_norm(grads, clip_norm=1.0)

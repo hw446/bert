@@ -22,12 +22,17 @@ import os
 import modeling
 import optimization
 import tensorflow as tf
+import horovod.tensorflow as hvd
 
 flags = tf.flags
 
 FLAGS = flags.FLAGS
 
 ## Required parameters
+flags.DEFINE_string(
+    "gpus", None,
+    "The ids of gpus that you want to use.")
+
 flags.DEFINE_string(
     "bert_config_file", None,
     "The config json file corresponding to the pre-trained BERT model. "
@@ -60,6 +65,8 @@ flags.DEFINE_integer(
 flags.DEFINE_bool("do_train", False, "Whether to run training.")
 
 flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
+
+flags.DEFINE_integer("seed", 12345, "The random seed.")
 
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
@@ -106,6 +113,11 @@ flags.DEFINE_integer(
     "Only used if `use_tpu` is True. Total number of TPU cores to use.")
 
 
+def log(info):
+  if hvd.rank() == 0:
+      tf.logging.info(info)
+
+
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
                      use_one_hot_embeddings):
@@ -114,9 +126,9 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
   def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
     """The `model_fn` for TPUEstimator."""
 
-    tf.logging.info("*** Features ***")
+    log("*** Features ***")
     for name in sorted(features.keys()):
-      tf.logging.info("  name = %s, shape = %s" % (name, features[name].shape))
+      log("  name = %s, shape = %s" % (name, features[name].shape))
 
     input_ids = features["input_ids"]
     input_mask = features["input_mask"]
@@ -164,24 +176,26 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
       else:
         tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
 
-    tf.logging.info("**** Trainable Variables ****")
+    log("**** Trainable Variables ****")
     for var in tvars:
       init_string = ""
       if var.name in initialized_variable_names:
         init_string = ", *INIT_FROM_CKPT*"
-      tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
-                      init_string)
+      log("  name = %s, shape = %s%s" %
+          (var.name, var.shape, init_string))
 
     output_spec = None
     if mode == tf.estimator.ModeKeys.TRAIN:
       train_op = optimization.create_optimizer(
-          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
+          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu,
+          bert_config.stop_grad_layers)
 
       output_spec = tf.contrib.tpu.TPUEstimatorSpec(
           mode=mode,
           loss=total_loss,
           train_op=train_op,
-          scaffold_fn=scaffold_fn)
+          scaffold_fn=scaffold_fn,
+          training_hooks=[hvd.BroadcastGlobalVariablesHook(0)])
     elif mode == tf.estimator.ModeKeys.EVAL:
 
       def metric_fn(masked_lm_example_loss, masked_lm_log_probs, masked_lm_ids,
@@ -228,7 +242,8 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
           mode=mode,
           loss=total_loss,
           eval_metrics=eval_metrics,
-          scaffold_fn=scaffold_fn)
+          scaffold_fn=scaffold_fn,
+          evaluation_hooks=[hvd.BroadcastGlobalVariablesHook(0)])
     else:
       raise ValueError("Only TRAIN and EVAL modes are supported: %s" % (mode))
 
@@ -404,6 +419,15 @@ def _decode_record(record, name_to_features):
 
 
 def main(_):
+  os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # see issue #152
+  os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpus.split(',')[hvd.rank()]
+  tf.set_random_seed(FLAGS.seed * 10 + hvd.rank())
+  if hvd.rank() != 0:
+    FLAGS.output_dir = None
+    FLAGS.init_checkpoint = None
+  else:
+    tf.gfile.MakeDirs(FLAGS.output_dir)
+
   tf.logging.set_verbosity(tf.logging.INFO)
 
   if not FLAGS.do_train and not FLAGS.do_eval:
@@ -411,15 +435,13 @@ def main(_):
 
   bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
 
-  tf.gfile.MakeDirs(FLAGS.output_dir)
-
   input_files = []
   for input_pattern in FLAGS.input_file.split(","):
     input_files.extend(tf.gfile.Glob(input_pattern))
 
-  tf.logging.info("*** Input Files ***")
+  log("*** Input Files ***")
   for input_file in input_files:
-    tf.logging.info("  %s" % input_file)
+    log("  %s" % input_file)
 
   tpu_cluster_resolver = None
   if FLAGS.use_tpu and FLAGS.tpu_name:
@@ -456,8 +478,8 @@ def main(_):
       eval_batch_size=FLAGS.eval_batch_size)
 
   if FLAGS.do_train:
-    tf.logging.info("***** Running training *****")
-    tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
+    log("***** Running training *****")
+    log("  Batch size = %d" % FLAGS.train_batch_size)
     train_input_fn = input_fn_builder(
         input_files=input_files,
         max_seq_length=FLAGS.max_seq_length,
@@ -465,9 +487,9 @@ def main(_):
         is_training=True)
     estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
 
-  if FLAGS.do_eval:
-    tf.logging.info("***** Running evaluation *****")
-    tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
+  if FLAGS.do_eval and hvd.rank() == 0:
+    log("***** Running evaluation *****")
+    log("  Batch size = %d" % FLAGS.eval_batch_size)
 
     eval_input_fn = input_fn_builder(
         input_files=input_files,
@@ -480,14 +502,16 @@ def main(_):
 
     output_eval_file = os.path.join(FLAGS.output_dir, "eval_results.txt")
     with tf.gfile.GFile(output_eval_file, "w") as writer:
-      tf.logging.info("***** Eval results *****")
+      log("***** Eval results *****")
       for key in sorted(result.keys()):
-        tf.logging.info("  %s = %s", key, str(result[key]))
+        log("  %s = %s" % (key, str(result[key])))
         writer.write("%s = %s\n" % (key, str(result[key])))
 
-
 if __name__ == "__main__":
+  hvd.init()
+  flags.mark_flag_as_required("gpus")
   flags.mark_flag_as_required("input_file")
   flags.mark_flag_as_required("bert_config_file")
-  flags.mark_flag_as_required("output_dir")
+  if hvd.rank() == 0:
+    flags.mark_flag_as_required("output_dir")
   tf.app.run()
