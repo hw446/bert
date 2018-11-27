@@ -420,7 +420,7 @@ def _decode_record(record, name_to_features):
 
 def main(_):
   os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"  # see issue #152
-  os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpus.split(',')[hvd.rank()]
+  os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpus.split(',')[hvd.rank()] if FLAGS.gpus else ""
   tf.set_random_seed(FLAGS.seed * 10 + hvd.rank())
   if hvd.rank() != 0:
     FLAGS.output_dir = None
