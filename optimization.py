@@ -24,26 +24,28 @@ import horovod.tensorflow as hvd
 
 
 def stop_grad(tvars, stop_grad_layers):
-  layers = stop_grad_layers.split(",")
-  stop_grad_layers = []
-  for layer in layers:
-    if layer.endswith("]"):
-      rang = layer[layer.find('[') + 1: -1].split("-")
-      layer = layer[: layer.find('[')].strip()
-      start, end = int(rang[0]), int(rang[1]) + 1
-      for idx in range(start, end):
-        stop_grad_layers.append('{}{}/'.format(layer, idx))
-    else:
-      stop_grad_layers.append(layer.strip())
+  if stop_grad_layers:
+    layers = stop_grad_layers.split(",")
+    stop_grad_layers = []
+    for layer in layers:
+      if layer.endswith("]"):
+        rang = layer[layer.find('[') + 1: -1].split("-")
+        layer = layer[: layer.find('[')].strip()
+        start, end = int(rang[0]), int(rang[1]) + 1
+        for idx in range(start, end):
+          stop_grad_layers.append('{}{}/'.format(layer, idx))
+      else:
+        stop_grad_layers.append(layer.strip())
 
-  new_tvars = []
-  for var in tvars:
-    for layer in stop_grad_layers:
-      if var.name.startswith(layer):
-        break
-    else:
-      new_tvars.append(var)
-  return new_tvars
+    new_tvars = []
+    for var in tvars:
+      for layer in stop_grad_layers:
+        if var.name.startswith(layer):
+          break
+      else:
+        new_tvars.append(var)
+    return new_tvars
+  return tvars
 
 
 def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, stop_grad_layers):
